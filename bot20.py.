@@ -1,0 +1,493 @@
+import logging
+import pickle
+import asyncio  # correct import
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+    CallbackQueryHandler
+)
+from telegram.constants import ChatAction
+
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+TOKEN = "7895537840:AAFi9MIvjgWtI7p_I0AUzNusXfUqq3r5--I"
+
+WIN_GIF = "https://media2.giphy.com/media/CiOHO5544doY/giphy.gif?cid=6c09b952a1d2y6xhdsspvd28r6guhdxrn931aplirqfjs7co&ep=v1_internal_gif_by_id&rid=giphy.gif&ct=g"
+
+LOSE_STICKER = "CAACAgIAAxkBAAEyrJBn1LBsmmHceCQ2jN65NK8EvPyILQACAgEAAladvQpO4myBy0Dk_zYE"
+
+# ====================== PERSISTENT STORAGE ======================
+
+def save_progress(user_id, user_data):
+    """Save user progress to a file."""
+    try:
+        with open(f"user_{user_id}.pkl", "wb") as f:
+            pickle.dump(user_data, f)
+    except Exception as e:
+        logger.error(f"Failed to save progress for user {user_id}: {e}")
+
+def load_progress(user_id):
+    """Load user progress from a file."""
+    try:
+        with open(f"user_{user_id}.pkl", "rb") as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        return None  # No progress file exists
+    except Exception as e:
+        logger.error(f"Failed to load progress for user {user_id}: {e}")
+        return None
+
+# ====================== RESTART COMMAND ======================
+
+async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset the user's progress and start the game from the beginning."""
+    user_id = update.message.from_user.id
+
+    # Reset progress
+    context.user_data.clear()  # Clear in-memory data
+    context.user_data.update({"index": 0, "badges": []})  # Reset to default
+
+    # Save the reset state
+    save_progress(user_id, context.user_data)
+
+    # Send confirmation message using typing effect
+    await send_message_with_typing(
+        context,
+        chat_id=update.message.chat_id,
+        message="🔄 Your progress has been reset! Use /start to begin again.",
+        delay=1.0
+    )
+
+# ====================== TYPING-EFFECT HELPER FUNCTION ======================
+async def send_message_with_typing(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message: str,
+    delay: float = 1.0,
+    parse_mode: str = None,
+    reply_markup=None
+):
+    """
+    Sends a 'typing' chat action, waits for a delay, then sends the message.
+    
+    :param context: The telegram ContextTypes.DEFAULT_TYPE.
+    :param chat_id: The target chat's ID.
+    :param message: The message text to send.
+    :param delay: The delay in seconds before sending (default 1.0).
+    :param parse_mode: Optional parse mode (e.g., "Markdown").
+    :param reply_markup: Optional reply markup (InlineKeyboardMarkup, etc).
+    """
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    await asyncio.sleep(delay)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=message,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup
+    )
+
+# ====================== BADGE CONFIGURATION ======================
+
+BADGES = {
+    "first_blood": {
+        "emoji": "🩸", 
+        "name": "First Blood", 
+        "desc": "You solved your first riddle!"
+    },
+    "vampire_rabbit": {
+        "emoji": "🐇🔪",  
+        "name": "Vampire Slayer",
+        "desc": "Defeated the stone rabbit!"
+    },
+    "bessie_house": {
+        "emoji": "💋❤️",    
+        "name": "Romantic Sweetheart",
+        "desc": "Found Bessie's secret love story!"
+    },
+    "tyne_bridge": {
+        "emoji": "🌉🔧",  
+        "name": "Bridge Builder",
+        "desc": "Discovered the Tyne Bridge's hidden plaque"
+    },
+    "hadrian": {
+        "emoji": "🛡️🧱🏹", 
+        "name": "Guardian",
+        "desc": "Defended the front lines of Hadrian's wall"
+    },
+    "quay": {
+        "emoji": "🌊🗝️", 
+        "name": "Quayside Sleuth",
+        "desc": "Cracked the waterfront code"
+    },
+    "victoria_tunnel": {
+        "emoji": "🚇👻", 
+        "name": "Tunnel Phantom",
+        "desc": "Braved the underground ghosts"
+    },
+    "grainger_town": {
+        "emoji": "🥳🎉🎊", 
+        "name": "Completed it mate",
+        "desc": "Solved all the Riddles and completed the scavenger hunt! Ree"
+    },
+    "ouseburn_farm": {
+        "emoji": "🐐🌱", 
+        "name": "Farm Friend", 
+        "desc": "Discovered Ouseburn Farm and met some friends"
+    },
+    "biscuit_factory": {
+        "emoji": "🍪🎨", 
+        "name": "Art Baker", 
+        "desc": "Solved the Biscuit Factory, mmm biscuits"
+    },
+    "st_nicholas": {
+        "emoji": "👻🎭", 
+        "name": "Phantom of the Opera", 
+        "desc": "Put on a show at The Royal Theatre"
+    },
+    "laing_gallery": {
+        "emoji": "🖼️🗿", 
+        "name": "Art Connoisseur", 
+        "desc": "Mastered Laing Gallery's artistic puzzles"
+}
+}
+
+#============= Riddles =============
+
+RIDDLES = [
+    {  # 1. Grey’s Monument
+        "riddle": "ɪ ᴛᴏᴡᴇʀ ᴀʙᴏᴠᴇ ᴛʜᴇ ꜱʜᴏᴘᴘɪɴɢ ꜰʀᴀʏ,   \nA ᴍᴀɴ ꜱᴏ ʜɪɢʜ ᴡʜᴏ ʀᴜʟᴇᴅ ᴛʜᴇ ᴅᴀʏ.\nᴜᴘ ᴀʙᴏᴠᴇ ᴛʜᴇ ᴄɪᴛʏ ɪ ᴘʀᴏᴛᴇᴄᴛ, ᴀɴꜱᴡᴇʀ ɪɴ ʀᴏᴍᴀɴ ꜰᴏʀ ᴛʜᴇ ʏᴇᴀʀ ɪ ᴡᴀꜱ ᴇʀʀᴇᴄᴛ.",
+        "answer": "MDCCCXXXVIII",
+        "hint": "Look where Grey Street and Grainger Street intersect!",
+        "image": "https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEgQ9dsxgJwQFmykuM2g0YDuOqh5o6n3TIC1xpc7FH_b9Pz2A4nXt_kFbMDdNNunIlKR8fK82PoxzhqF7GNxeOHExvJLKnAHnW0bTokoZ8A97r8JUBuYAtf66Br3EFPKcX_2iqxiwQ/s1600/d13-12-25+Toon+on+Xmas+Day+(64).jpg",
+        "info": "This 135ft column honors Earl Grey (prime minister), who abolished slavery in the British Empire! The ‘weeping lady’ ghost is said to mourn his death. A time capsule was buried beneath the foundation stone, containing drawings, a list of subscribers, and coins, medals, and tokens from the time.",
+        "badge": "first_blood"
+    },
+    {  # 2. Vampire Rabbit
+        "riddle": "ɪ’ᴍ ɴᴏᴛ ᴀ ʙᴀᴛ, ʙᴜᴛ ɪ’ᴠᴇ ɢᴏᴛ ꜱʜᴀʀᴘ ᴛᴇᴇᴛʜ,\nɢᴜᴀʀᴅɪɴɢ ᴀ ᴄʜᴜʀᴄʜ, ʙᴜᴛ ɴᴏᴛ ꜰʀᴏᴍ ᴜɴᴅᴇʀɴᴇᴀᴛʜ.\nᴄᴏᴜɴᴛ ᴛʜᴇ ʜᴏʟʏ ʙᴏᴏᴋꜱ ʏᴏᴜ ꜱᴇᴇ,\nᴀɴᴅ ᴛᴇʟʟ ᴍᴇ ᴛʜᴇ ᴀɴꜱᴡᴇʀ ᴛʜᴀᴛ ʏᴏᴜ ᴘᴇʀᴄɪᴇᴠᴇ",
+        "answer": "5",
+        "hint": "Above a cathedral door near the Quayside!",
+        "image": "https://scranshums.com/wp-content/uploads/2018/07/800px-cathedral_buildings_dean_street_-_geograph-org-uk_-_1732979.jpg",
+        "info": "No one knows why this rabbit has fangs! Some say it’s a medieval joke mocking greedy lawyers but locals tell a tale of grave robbers who were running rampant until one dark night the fanged beast rose from the doorway, pounced and sucked the grave robbers blood dry.",
+        "badge": "vampire_rabbit"
+    },
+    {  # 3. Bessie Surtees House
+        "riddle": "ᴛᴡᴏ ʟᴏᴠᴇʀꜱ ꜰʟᴇᴅ ᴛᴏ ᴄʜᴇᴀᴛ ᴛʜᴇɪʀ ꜰᴀᴛᴇ,\nᴛʜʀᴏᴜɢʜ ᴍʏ ᴏᴀᴋ ᴅᴏᴏʀꜱ ᴛʜᴇʏ ꜱᴇᴀʟᴇᴅ ᴛʜᴇɪʀ ᴅᴀᴛᴇ.\nꜰɪɴᴅ ᴛʜᴇ ʏᴇᴀʀ ᴛʜᴇʏ ᴍᴀᴅᴇ ᴛʜᴇɪʀ ᴠᴏᴡ,\nɪɴ ʀᴏᴍᴀɴ ɴᴜᴍʙᴇʀꜱ—ᴛᴇʟʟ ᴍᴇ ʜᴏᴡ.",
+        "answer": "MDLXXVII",
+        "hint": "A black-and-white timber house on Sandhill.",
+        "image": "https://ih1.redbubble.net/image.2213527691.6663/flat,750x,075,f-pad,750x1000,f8f8f8.u2.jpg",
+        "info": "Bessie Surtee eloped at 17, in 1772, in order to escape an arranged marriage, she climbed out a window here to elope with John Scott, who later became Lord Chancellor of England! The marriage was blessed two months later at St. Nicholas's Church.",
+        "badge": "bessie_house"
+    },
+    {  # 4. Tyne Bridge Builders’ Plaque
+        "riddle": "ɪ’ᴍ ɴᴏᴛ ᴀ ʜᴀʀᴘ, ʙᴜᴛ ɪ’ᴠᴇ ɢᴏᴛ ꜱᴛᴇᴇʟ ꜱᴛʀɪɴɢꜱ,\nᴍʏ ᴀʀᴄʜ ʜᴀꜱ ꜱᴇᴇɴ ᴏᴠᴇʀ ᴀ ᴛʜᴏᴜꜱᴀɴᴅ ᴛʜɪɴɢꜱ.\nꜰɪɴᴅ ᴛʜᴇ ᴘʟᴀQᴜᴇ ᴛʜᴀᴛ ʜᴏɴᴏʀꜱ ᴛʜᴇ ʜᴀɴᴅꜱ,\nᴏꜰ ᴛʜᴇ ᴡᴏᴍᴀɴ ᴡʜᴏ ʜᴇʟᴘᴇᴅ ᴛᴏ ᴘʟᴀɴ",
+        "answer": "Dorothy Buchanan",
+        "hint": "she was the first female member of the institution of civil engineers (1927)",
+        "image": "https://di262mgurvkjm.cloudfront.net/233c15f3-5b36-46a1-b641-11f29ab2f1a9/IMG_5159-Edit_uxga.jpg",
+        "info": "Built in 1928, the Tyne Bridge used 7,000 tons of steel and took 4 years to complete! The towers were built of Cornish granite and designed as warhouses. Dorothy Buchanan Born in Scotland was the first female member of the Institution of Civil Engineers, passing her examination in 1927.",
+        "badge": "tyne_bridge"
+    },
+    {  # 5. Castle Keep Raven
+        "riddle": "ᴡʜᴇʀᴇ ʀᴀᴠᴇɴꜱ ᴏɴᴄᴇ ꜰʟᴇᴡ, ɴᴏᴡ ᴛᴏᴜʀɪꜱᴛꜱ ᴛʀᴇᴀᴅ,\nᴡʜɪꜱᴘᴇʀ ᴀ ꜱᴇᴄʀᴇᴛ ᴛᴏ ᴛʜᴇ ʙʟᴀᴄᴋ ʙɪʀᴅ’ꜱ ʜᴇᴀᴅ.\nᴡʜᴀᴛ’ꜱ ᴛʜᴇ ᴡᴏʀᴅ ᴏɴʟʏ ɴᴇᴡᴄᴀꜱᴛʟᴇ ʜᴇᴀʀꜱ?\n(ɪᴛ’ꜱ ʟɪɴᴋᴇᴅ ᴛᴏ ᴡᴀʟʟꜱ ᴏꜰ ᴀɴᴄɪᴇɴᴛ ʏᴇᴀʀꜱ).",
+        "answer": "hadrian's wall",
+        "hint": "A stone fortress near the train station. The raven is in the courtyard! Also a key historic roman wall",
+        "image": "https://media.gettyimages.com/id/584423147/photo/hadrians-wall-at-sunset.jpg?s=612x612&w=gi&k=20&c=33-PgFhKDnGpJ3q0b6koDyYkDK4c1aHXncN0jGpp1k4=",
+        "info": "Hadrian’s Wall ends in Wallsend, Newcastle! Built by the Roman army on orders of Emperor Hadrian in AD122, the wall served as the Empire's northern frontier for nearly 300 years.",
+        "badge": "hadrian"
+    },
+    {  # 6. Quayside Market "QUAY"
+        "riddle": "ꜰɪɴᴅ ᴛʜᴇ ᴘʟᴀᴄᴇ ᴡʜᴇʀᴇ ᴀʀᴛ ᴍᴇᴇᴛꜱ ᴛɪᴅᴇ,\nᴀ ᴍɪʀʀᴏʀᴇᴅ ᴡᴀʟʟ ʀᴇꜰʟᴇᴄᴛꜱ ᴛʜᴇ ᴛʏɴᴇ’ꜱ ᴘʀɪᴅᴇ.\nʜᴜɴᴛ ꜰᴏʀ ᴀ ᴡᴏʀᴅ ᴛʜᴀᴛ’ꜱ ʜɪᴅᴅᴇɴ ᴡɪᴛʜɪɴ—\nᴛʜᴇ 5ᴛʜ ꜰʟᴏᴏʀ ɪꜱ ᴜꜱᴇᴅ ꜰᴏʀ ᴠɪᴇᴡɪɴɢ.",
+        "answer": "Baltic Centre",
+        "hint": "Artsy place with a view",
+        "image": "https://cdn.fabulousnorth.com/fabulous-north/place/20220601-145929-c981b68da79.jpg?width=400",
+        "info": "The Quayside Market has been a trading hub since the 12th century! Baltic Centre for Contemporary Art opened on 13 July 2002 and has been visited over 7,000,000 times.",
+        "badge": "quay"
+    },
+    {  # 7. Victoria Tunnel Entrance
+        "riddle": "ᴄᴏᴀʟ ᴀɴᴅ ᴡᴀʀ ᴏɴᴄᴇ ꜰɪʟʟᴇᴅ ᴍʏ ᴠᴇɪɴꜱ,\nɴᴏᴡ ɪ ᴡʜɪꜱᴘᴇʀ ɴᴇᴡᴄᴀꜱᴛʟᴇ’ꜱ ᴘᴀɪɴꜱ.\nꜰɪɴᴅ ᴛʜᴇ ᴅᴏᴏʀ ᴡʜᴇʀᴇ ᴛʜᴇ ᴅᴀʀᴋ ʙᴇɢɪɴꜱ—\nʙᴜᴛ ᴅᴏɴ’ᴛ ɢᴏ ɪɴ… ᴊᴜꜱᴛ ɢʀɪɴ ꜰᴏʀ ᴛʜᴇ ᴡɪɴ!",
+        "answer": "Victoria Tunnel",
+        "hint": "Brick arches on Ouse Street. Look for a green historical marker!",
+        "image": "https://media-cdn.tripadvisor.com/media/photo-s/03/c2/5d/5c/victoria-tunnel.jpg",
+        "info": "The Victoria Tunnel is a subterranean wagonway that runs under Newcastle upon Tyne, England, from the Town Moor down to the River Tyne. It was built between 1839 and 1842 to transport coal from Leazes Main Colliery in Spital Tongues, to riverside staithes, ready for loading onto boats for export it was used for shelter during the WWII bombings.",
+        "badge": "victoria_tunnel"
+    },
+    {  # 8. Ouseburn Farm
+        "riddle": "ᴡʜᴇʀᴇ ʙʟᴇᴀᴛ ᴀɴᴅ ᴄʟᴜᴄᴋ ᴄᴀᴜꜱᴇꜱ ᴀ ꜰᴜꜱꜱ,\nYᴏᴜ ᴍɪɢʜᴛ ꜰɪɴᴅ ꜱᴏᴍᴇᴛʜɪɴɢ ʙɪɢ ᴅᴇᴍᴏɴ ᴡᴏᴜʟᴅ ʜᴀᴠᴇ ꜰᴏʀ ʟᴜɴᴄʜ.\nꜰɪɴᴅ ᴛʜᴇ ɢᴀᴛᴇ ᴡʜᴇʀᴇ ᴛʜᴇ ʀɪᴠᴇʀ ʙᴇɴᴅꜱ—\nᴀ ᴄᴏᴜɴᴛʀʏ ꜱᴏᴜʟ ɪɴ ᴛʜᴇ ᴄɪᴛʏ’ꜱ ᴇɴᴅꜱ.",
+        "answer": "ouseburn farm",
+        "hint": "A hidden slice of countryside near the Ouseburn River and Seven Stories museum!",
+        "image": "https://static.wixstatic.com/media/3421de_7e90621425164ae1aeee89ee3df8c085~mv2.jpg/v1/fill/w_560,h_298,al_c,q_90,enc_avif,quality_auto/3421de_7e90621425164ae1aeee89ee3df8c085~mv2.jpg",
+        "info": "This community farm has thrived since 1976, rescuing rare-breed animals and teaching kids about nature. Its meant to have a friendly goat called gerald lol",
+        "badge": "ouseburn_farm"
+    },
+    {  # 9. The Biscuit Factory
+        "riddle": "ᴡʜᴇʀᴇ ᴏᴠᴇɴꜱ ᴏɴᴄᴇ ʙᴀᴋᴇᴅ ꜱᴡᴇᴇᴛ ᴅᴇʟɪɢʜᴛ,\nɴᴏᴡ ᴄᴀɴᴠᴀꜱᴇꜱ ʙʟᴏᴏᴍ ɪɴ ᴇʟᴇᴄᴛʀɪᴄ ʟɪɢʜᴛ.\nꜰɪɴᴅ ᴍʏ ʙʀɪᴄᴋꜱ ᴡʜᴇʀᴇ ꜰʟᴏᴜʀ ᴛᴜʀɴᴇᴅ ᴛᴏ ᴀʀᴛ, ᴀ ꜰᴀᴄᴛᴏʀʏ ʀᴇʙᴏʀɴ ᴡɪᴛʜ ᴀ ᴄʀᴇᴀᴛɪᴠᴇ ʜᴇᴀʀᴛ"
+    ,    "answer": "The biscuit factory",
+        "hint": "A red-brick Victorian building in Shieldfield. Look for art, not biscuits!",
+        "image": "https://lh3.googleusercontent.com/p/AF1QipMmFZC0vvAKW0Nk-qZjC3b8lGT1g4sf8qmq0QlG=s1332-w720-h1332",
+        "info": "This 19th-century factory once produced Huntley & Palmers biscuits, I wonder if theres any left mmm. Today, it’s the UK’s largest commercial contemporary art gallery.",
+        "badge": "biscuit_factory"
+    },
+    {  # 10. Laing Art Gallery
+	        "riddle": "ɪɴ ᴛʜᴇ ʜᴇᴀʀᴛ ᴏꜰ ᴀ ᴄɪᴛʏ ᴡʜᴇʀᴇ ᴛʜᴇ ʀɪᴠᴇʀ ᴛʏɴᴇ ꜰʟᴏᴡꜱ,\nᴀ ʜᴏᴜꜱᴇ ᴏꜰ ɢʀᴇᴀᴛ ʙᴇᴀᴜᴛʏ ᴡʜᴇʀᴇ ᴄʀᴇᴀᴛɪᴠɪᴛʏ ɢʀᴏᴡꜱ.\nɴᴏ ᴀʀᴛɪꜱᴛ ᴀᴍ ɪ, ʏᴇᴛ ᴛʜᴇɪʀ ᴡᴏʀᴋꜱ ɪ ᴅɪꜱᴘʟᴀʏ,\nꜰʀᴏᴍ ᴡᴀᴛᴇʀᴄᴏʟᴏʀꜱ ʙʀɪɢʜᴛ ᴛᴏ ʙᴏʟᴅ ꜱʜᴀᴅᴇꜱ ᴏꜰ ɢʀᴀʏ.",
+        "answer": "laing art gallery",
+        "hint": "Look up! A statue of Justice crowns this gallery on New Bridge Street.",
+        "image": "https://lh3.googleusercontent.com/p/AF1QipMWxgpxXAlKMor3ws_05BESjPOTYfI-UL_F9o58=s1332-w720-h1332",
+        "info": "⚖️ Symbol Fact: The statue of Justice watches over the gallery, symbolizing art’s power to weigh perspectives.",
+        "badge": "laing_gallery"
+    },
+    {  # Anagram Puzzle (St. Nicholas’ Cathedral)
+        "riddle": "ᴅʀᴀᴍᴀ ᴀɴᴅ ᴇʟᴇɢᴀɴᴄᴇ, ꜰɪʀꜱᴛ ᴏᴘᴇɴᴇᴅ ɪɴ 1837\nʟᴀʀᴏᴛ + ʜᴇᴀᴛ + ʀᴇʏ = ❓",
+        "answer": "The Royal Theatre",
+        "hint": "the is used twice, 3 words",
+        "info": "The Theatre Royal Newcastle, granted its Royal licence by King George III, has a rich history, initially opening on Drury Lane in 1788, and later relocating to Grey Street in 1837, becoming a flagship building in Grainger and Dobson's city plan. ",
+        "badge": "st_nicholas"
+    },
+    {  # Final Puzzle Grainger Town
+        "riddle": "\n🔑✨ *ᴛʜᴇ ɢʀᴀɴᴅ ꜰɪɴᴀʟᴇ* ✨🔑\n"
+                  "ᴛʜʀᴏᴜɢʜ ᴛʜᴇ ꜱᴛʀᴇᴇᴛꜱ ᴏꜰ ᴀ ɢʀᴇᴀᴛ ᴄɪᴛʏ ʏᴏᴜ’ᴠᴇ ʀᴏᴀᴍᴇᴅ,\nꜰʀᴏᴍ ᴛʜᴇ ᴛᴏᴡᴇʀ ᴏꜰ ɢʀᴇʏ ᴛᴏ ᴛʜᴇ ʀᴀʙʙɪᴛ ᴛʜᴀᴛ’ꜱ ғᴀɴɢᴇᴅ.\nᴛʜᴇ ʟᴏᴠᴇʀꜱ ᴡʜᴏ ꜰʟᴇᴅ, ᴛʜᴇ ʜᴀʀᴘ-ʟɪᴋᴇ ʙʀɪᴅɢᴇ,\nᴛʜᴇ ᴛᴜɴɴᴇʟꜱ ᴏꜰ ᴡᴀʀ ᴀɴᴅ ᴛʜᴇ ꜰᴀʀᴍ ɴᴇᴀʀ ᴛʜᴇ ʀɪᴅɢᴇ.\nᴛʜᴇ ʟᴀꜱᴛ ᴏꜰ ʏᴏᴜʀ ᴄʟᴜᴇꜱ ɴᴏᴡ ꜰɪɴᴅꜱ ɪᴛꜱ ᴘʟᴀᴄᴇ,\nᴡʜᴇʀᴇ ᴀʀᴛ ᴀɴᴅ ʜɪꜱᴛᴏʀʏ ꜱʜᴀʀᴇ ᴏɴᴇ ʟᴀꜱᴛ ᴇᴍʙʀᴀᴄᴇ.\nꜰɪɴᴅ ᴛʜᴇ ꜱᴛᴀɪɴᴇᴅ ɢʟᴀꜱꜱ ᴀɴᴅ ᴛʜᴇ ᴛᴏᴡᴇʀ ᴛʜᴀᴛ ɢʟᴏᴡꜱ,\nᴛʜᴇ ꜰɪɴᴀʟ ᴀɴꜱᴡᴇʀ ɪꜱ ᴀ ᴘʟᴀᴄᴇ ᴇᴠᴇʀʏᴏɴᴇ ᴋɴᴏᴡꜱ." ,
+                "answer": "St. Nicholas Cathedral",
+        "hint": "hes a saint",
+        "image": "https://img.freepik.com/premium-vector/key-cartoon-vector-illustration-cute-key-cartoon-drawing-playful-unlocking-tool-design_648083-559.jpg",
+        "info": "Newcastle Cathedral, originally the Parish Church of St Nicholas, has a history spanning over 900 years, evolving from a Norman church built in 1091 to the current Perpendicular style structure completed around 1350, and becoming a cathedral in 1882. ",
+        "badge": "grainger_town"
+ }
+]
+
+# ====================== START FUNCTION ======================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initialize the game and show buttons."""
+    context.user_data.setdefault("index", 0)  # Ensure index exists
+    context.user_data.setdefault("badges", [])  # Ensure badges list exists
+
+    gif_url = "https://media4.giphy.com/media/136V8raQQogOfm/giphy.gif?cid=6c09b952gkeoppookgva4yy0gqmjg9tp9up4yz30ibshxuzw&ep=v1_internal_gif_by_id&rid=giphy.gif&ct=g"
+
+    keyboard = [[InlineKeyboardButton("⏩️🗝   Begin Your Adventure!! ✨️🎈🎉🌈", callback_data="riddle")]]
+
+    # Send starting GIF
+    await update.message.reply_animation(animation=gif_url)
+    
+    # Send welcome text using typing effect
+    await send_message_with_typing(
+        context,
+        chat_id=update.message.chat_id,
+        message="👻🐱 Welcome to your Birthday Scavenger Hunt Little Demon! 😈\nI hope you're excited to begin your adventure! Solve these riddles with some wiggles to earn badges and explore some of Newcastle's most iconic places! Feel free to Treat yourself along the way!🍕🍟🍩 ",
+        delay=0.0,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ====================== SEND RIDDLE FUNCTION ======================
+
+async def send_riddle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send the next riddle with a typing effect."""
+    query = update.callback_query
+    await query.answer()
+
+    index = context.user_data.get("index", 0)
+
+    if index < len(RIDDLES):
+        riddle_data = RIDDLES[index]
+        image_url = riddle_data.get("image")
+        riddle_text = riddle_data["riddle"]
+
+        progress_message = f"🧩📜 *𝕽𝖎𝒹𝒹𝓁𝑒({index + 1}/{len(RIDDLES)}):*\n{riddle_text}"
+        keyboard = [
+            [InlineKeyboardButton("💡 Hint", callback_data="hint"),
+             InlineKeyboardButton("🏆 Badges", callback_data="badges"),
+             InlineKeyboardButton("⏭ Skip", callback_data="skip")]
+        ]
+
+        # Send image if available
+        if image_url:
+            try:
+                await query.message.reply_photo(photo=image_url)
+            except Exception as e:
+                logger.error(f"Failed to send image: {e}")
+                await send_message_with_typing(
+                    context,
+                    chat_id=query.message.chat_id,
+                    message="⚠️ Couldn't load the image, but here's the riddle!",
+                    delay=1.0
+                )
+
+        # Send the riddle text with typing effect
+        await send_message_with_typing(
+            context,
+            chat_id=query.message.chat_id,
+            message=progress_message,
+            delay=0.5,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        # Final message when all riddles are completed
+        gif_url = "https://media3.giphy.com/media/13CoXDiaCcCoyk/giphy.gif?cid=6c09b9524c9iyy5vc09711is3dgwvxr3jvj9lveweg2vphyp&ep=v1_internal_gif_by_id&rid=giphy.gif&ct=g"
+        await query.message.reply_animation(animation=gif_url)
+        await send_message_with_typing(
+            context,
+            chat_id=query.message.chat_id,
+            message="🎉 Congratulations babe! You have completed all of the riddles and your birthday scavenger hunt!🏆I hope you had lots of fun and enjoyed your unique Birthday present 🎂🥳🎉. Thankyou for everything you do Molly I love you so much! you mean the world to me.. I hope you have the perfect Birthday! Let's make some memories to cherish. Lots of love! your big demon😈 Reee",
+            delay=0.5
+        )
+
+# ====================== HINT FUNCTION ======================
+
+async def hint_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Provide the correct hint for the current riddle."""
+    query = update.callback_query
+    await query.answer()
+
+    index = context.user_data.get("index", 0)
+    if index < len(RIDDLES):
+        hint_text = RIDDLES[index].get("hint", "Hmmm No hint available!")
+        await send_message_with_typing(
+            context,
+            chat_id=query.message.chat_id,
+            message=f"💡 Hint: {hint_text}",
+            delay=0.0,
+            parse_mode="Markdown"
+        )
+    else:
+        await send_message_with_typing(
+            context,
+            chat_id=query.message.chat_id,
+            message="❌ No more hints available!",
+            delay=0.0
+        )
+
+# ====================== SKIP FUNCTION ======================
+
+async def skip_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allow the user to skip a riddle."""
+    query = update.callback_query
+    await query.answer()
+
+    index = context.user_data.get("index", 0)
+    if index < len(RIDDLES) - 1:
+        context.user_data["index"] += 1  # Move to the next riddle
+        save_progress(update.effective_user.id, context.user_data)  # Save progress
+        await send_riddle(update, context)
+    else:
+        await send_message_with_typing(
+            context,
+            chat_id=query.message.chat_id,
+            message="🎉 You’ve completed all riddles! 🏆",
+            delay=0.0
+        )
+
+# ====================== CHECK ANSWER FUNCTION ======================
+
+async def check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check if the user's answer is correct, award a badge, and move to the next riddle."""
+    user_answer = update.message.text.strip().lower()
+    index = context.user_data.get("index", 0)
+
+    if index < len(RIDDLES):
+        correct_answer = RIDDLES[index]["answer"].lower()
+        info_text = RIDDLES[index].get("info")
+        badge_key = RIDDLES[index].get("badge")
+
+        if user_answer == correct_answer:
+            # Send Win GIF First
+            await update.message.reply_animation(animation=WIN_GIF)
+
+            message = "✅ Correct!"
+            if info_text:
+                message += f"\n\n📜 *Did you know?* {info_text}"
+            
+            # Send the info message separately
+            await send_message_with_typing(
+                context,
+                chat_id=update.message.chat_id,
+                message=message,
+                delay=0.5,
+                parse_mode="Markdown"
+            )
+
+            # Award badge if not already given
+            context.user_data.setdefault("badges", [])
+            if badge_key and badge_key in BADGES and badge_key not in context.user_data["badges"]:
+                badge = BADGES[badge_key]
+                context.user_data["badges"].append(badge_key)
+                await send_message_with_typing(
+                    context,
+                    chat_id=update.message.chat_id,
+                    message=f"🏅 * YOU'VE EARNED A BADGE!\n\n* {badge['emoji']} *{badge['name']}*\n\n_{badge['desc']}_",
+                    delay=5.0,
+                    parse_mode="Markdown"
+                )
+
+            # Move to next riddle
+            context.user_data["index"] += 1
+            keyboard = [[InlineKeyboardButton("  ⏩️  Continue!     ", callback_data="riddle")]]
+
+            # Use a tiny placeholder (`.`) to force Telegram to show the button
+            await update.message.reply_text(
+                text="Well Done!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+
+        else:
+            # Send Lose Sticker First
+            await update.message.reply_sticker(sticker=LOSE_STICKER)
+
+            await send_message_with_typing(
+                context,
+                chat_id=update.message.chat_id,
+                message="❌ Wrong answer! Try again.",
+                delay=1.0
+            )
+
+
+# ====================== VIEW BADGES FUNCTION ======================
+
+async def view_badges(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display the user's collected badges."""
+    query = update.callback_query
+    await query.answer()
+
+    badges = context.user_data.get("badges", [])
+    if badges:
+        badges_list = "\n".join([f"{BADGES[badge]['emoji']} *{BADGES[badge]['name']}*" for badge in badges])
+        await send_message_with_typing(
+            context,
+            chat_id=query.message.chat_id,
+            message=f"🏆 **Your Badges:**\n{badges_list}",
+            delay=0.0,
+            parse_mode="Markdown"
+        )
+    else:
+        await send_message_with_typing(
+            context,
+            chat_id=query.message.chat_id,
+            message="🏅 Hmmm No badges earned yet! Solve riddles to earn some!",
+            delay=0.0
+        )
+
+# ====================== SETUP BOT ======================
+
+def main():
+    application = Application.builder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("restart", restart))
+    application.add_handler(CallbackQueryHandler(send_riddle, pattern="^riddle$"))
+    application.add_handler(CallbackQueryHandler(hint_callback, pattern="^hint$"))
+    application.add_handler(CallbackQueryHandler(skip_callback, pattern="^skip$"))
+    application.add_handler(CallbackQueryHandler(view_badges, pattern="^badges$"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_answer))
+
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
